@@ -3,79 +3,138 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>One-to-One Video Chat</title>
+    <title>WebRTC Video Chat</title>
     <style>
         video {
             width: 45%;
-            margin: 10px;
-            border: 1px solid #000;
+            margin: 20px;
         }
     </style>
 </head>
 <body>
-<h1>One-to-One Video Chat</h1>
-<video id="localVideo" autoplay playsinline muted></video>
-<video id="remoteVideo" autoplay playsinline></video>
+    <h2>WebRTC Video Chat</h2>
+    <video id="localVideo" autoplay muted></video>
+    <video id="remoteVideo" autoplay></video>
+    <br>
+    <button id="startButton">Start Call</button>
 
-<script>
-    const signalingServer = new WebSocket('ws://10.9.24.4:3000');
-    const peerConnection = new RTCPeerConnection();
-    const localVideo = document.getElementById('localVideo');
-    const remoteVideo = document.getElementById('remoteVideo');
+    <script>
+        const localVideo = document.getElementById('localVideo');
+        const remoteVideo = document.getElementById('remoteVideo');
+        const startButton = document.getElementById('startButton');
+        let localStream;
+        let peerConnection;
+        const signalingServer = new WebSocket('wss://sub.domain.com');  // WebSocket server URL
 
-    // Get local media (camera/microphone)
-    navigator.mediaDevices.getUserMedia({ video: true, audio: true })
-        .then((stream) => {
-            localVideo.srcObject = stream;
-            stream.getTracks().forEach(track => peerConnection.addTrack(track, stream));
-        })
-        .catch(console.error);
+        // Define the ICE server configuration (STUN server in this case)
+        const configuration = {
+            iceServers: [
+                {
+                    urls: 'stun:stun.l.google.com:19302'  // Google public STUN server
+                }
+            ]
+        };
 
-    // Handle remote media
-    peerConnection.ontrack = (event) => {
-        remoteVideo.srcObject = event.streams[0];
-    };
+        // Set up WebSocket connection for signaling
+        signalingServer.onopen = () => {
+            console.log('Connected to signaling server');
+        };
 
-    // Send ICE candidates to the signaling server
-    peerConnection.onicecandidate = (event) => {
-        if (event.candidate) {
-            signalingServer.send(JSON.stringify({ candidate: event.candidate }));
-        }
-    };
-
-    // Listen for messages from the signaling server
-    signalingServer.onmessage = async (message) => {
-        try {
-            const data = JSON.parse(message.data); // Parse incoming data
+        signalingServer.onmessage = (message) => {
+            const data = JSON.parse(message.data);
             if (data.offer) {
-                await peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
+                handleOffer(data.offer);
+            } else if (data.answer) {
+                handleAnswer(data.answer);
+            } else if (data.iceCandidate) {
+                handleNewICECandidate(data.iceCandidate);
+            }
+        };
+
+        // Start the call (get local stream and create offer)
+        startButton.onclick = async () => {
+            try {
+                // Access user's camera and microphone
+                localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+                localVideo.srcObject = localStream;
+
+                // Create a new RTCPeerConnection
+                peerConnection = new RTCPeerConnection(configuration);
+
+                // Add the local stream to the peer connection
+                localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+
+                // Listen for ICE candidates from the peer connection
+                peerConnection.onicecandidate = (event) => {
+                    if (event.candidate) {
+                        signalingServer.send(JSON.stringify({ iceCandidate: event.candidate }));
+                    }
+                };
+
+                // When a remote stream is added, display it on the remote video element
+                peerConnection.ontrack = (event) => {
+                    remoteVideo.srcObject = event.streams[0];
+                };
+
+                // Create an offer and send it to the signaling server
+                const offer = await peerConnection.createOffer();
+                await peerConnection.setLocalDescription(offer);
+                signalingServer.send(JSON.stringify({ offer: offer }));
+            } catch (error) {
+                console.error('Error starting WebRTC call:', error);
+            }
+        };
+
+        // Handle incoming offer from the other peer
+        const handleOffer = async (offer) => {
+            try {
+                // Create a new RTCPeerConnection
+                peerConnection = new RTCPeerConnection(configuration);
+
+                // Set the remote description (the incoming offer)
+                await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
+
+                // Add the local stream to the peer connection
+                localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+
+                // Create an answer and send it back to the signaling server
                 const answer = await peerConnection.createAnswer();
                 await peerConnection.setLocalDescription(answer);
-                signalingServer.send(JSON.stringify({ answer }));
-            } else if (data.answer) {
-                await peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
-            } else if (data.candidate) {
-                await peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
+                signalingServer.send(JSON.stringify({ answer: answer }));
+
+                // Listen for ICE candidates from the peer connection
+                peerConnection.onicecandidate = (event) => {
+                    if (event.candidate) {
+                        signalingServer.send(JSON.stringify({ iceCandidate: event.candidate }));
+                    }
+                };
+
+                // When a remote stream is added, display it on the remote video element
+                peerConnection.ontrack = (event) => {
+                    remoteVideo.srcObject = event.streams[0];
+                };
+            } catch (error) {
+                console.error('Error handling offer:', error);
             }
-        } catch (err) {
-            console.error('Error parsing message:', err);
-        }
-    };
+        };
 
-    // Create and send an offer
-    async function startCall() {
-        const offer = await peerConnection.createOffer();
-        await peerConnection.setLocalDescription(offer);
-        signalingServer.send(JSON.stringify({ offer }));
-    }
+        // Handle incoming answer from the other peer
+        const handleAnswer = async (answer) => {
+            try {
+                await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
+            } catch (error) {
+                console.error('Error handling answer:', error);
+            }
+        };
 
-    // Start call on user action
-    signalingServer.onopen = () => {
-        console.log("Connected to the signaling server.");
-        if (confirm("Do you want to start the call?")) {
-            startCall();
-        }
-    };
-</script>
+        // Handle new ICE candidates from the other peer
+        const handleNewICECandidate = async (iceCandidate) => {
+            try {
+                await peerConnection.addIceCandidate(new RTCIceCandidate(iceCandidate));
+            } catch (error) {
+                console.error('Error adding ICE candidate:', error);
+            }
+        };
+    </script>
 </body>
 </html>
